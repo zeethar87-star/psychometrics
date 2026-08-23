@@ -1,0 +1,55 @@
+name: PSIE D027 temporary acquisition
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Materialize exact public CAD sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p acquisition/sources acquisition/licenses
+          fetch_check() {
+            id="$1"; url="$2"; out="$3"; expected_size="$4"; expected_blob="$5"
+            echo "Fetching $id"
+            curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 "$url" -o "$out"
+            actual_size="$(wc -c < "$out" | tr -d ' ')"
+            test "$actual_size" = "$expected_size"
+            actual_blob="$(git hash-object "$out")"
+            test "$actual_blob" = "$expected_blob"
+          }
+          fetch_check ylevental 'https://raw.githubusercontent.com/ylevental/cad-portfolio/main/librecad/floor_plan.dxf' acquisition/sources/ylevental_floor_plan.dxf 33328 0adc9eff4ce6749af8bdf0a7dff9824ec6defce2
+          fetch_check gmbcode 'https://raw.githubusercontent.com/gmbcode/NSVIF_Proto_Ag/main/output_dxf.dxf' acquisition/sources/gmbcode_output_dxf.dxf 24112 b239848ad6c08f90f0b6ec5dac1e98b35b1ea95a
+          fetch_check pyurcad 'https://raw.githubusercontent.com/dblanding/pyurcad/master/savedCadFiles/houseplan.dxf' acquisition/sources/pyurcad_houseplan.dxf 60551 ed1dca02c0d825c96d676e1cf9c862cbe38174b1
+          fetch_check ishan 'https://raw.githubusercontent.com/ishan-parihar/AI-CAD/main/outputs/4f9be26c-0d37-4ae2-aa57-c3d116be9e02/Fix%20Demonstration%20Plan.dxf' acquisition/sources/ishan_fix_demo.dxf 17543 6cd34f8b742125460299f4d43af20c35cc158b8d
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/ylevental/cad-portfolio/main/LICENSE' -o acquisition/licenses/ylevental_LICENSE.txt
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/gmbcode/NSVIF_Proto_Ag/main/LICENSE' -o acquisition/licenses/gmbcode_LICENSE.txt
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/dblanding/pyurcad/master/LICENSE' -o acquisition/licenses/pyurcad_LICENSE.txt
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/ishan-parihar/AI-CAD/main/LICENSE' -o acquisition/licenses/ishan_LICENSE.txt
+          (cd acquisition && sha256sum sources/* licenses/* > SHA256SUMS.txt)
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess
+          root=pathlib.Path('acquisition')
+          specs=[('ylevental_cad_portfolio','ylevental_floor_plan.dxf','0adc9eff4ce6749af8bdf0a7dff9824ec6defce2','MIT'),('gmbcode_nsvif_proto','gmbcode_output_dxf.dxf','b239848ad6c08f90f0b6ec5dac1e98b35b1ea95a','LGPL-2.1'),('dblanding_pyurcad','pyurcad_houseplan.dxf','ed1dca02c0d825c96d676e1cf9c862cbe38174b1','GPL-3.0'),('ishan_parihar_ai_cad','ishan_fix_demo.dxf','6cd34f8b742125460299f4d43af20c35cc158b8d','MIT')]
+          rows=[]
+          for family,name,blob,lic in specs:
+              p=root/'sources'/name; b=p.read_bytes()
+              rows.append({'family':family,'filename':name,'local_bytes':len(b),'git_blob_sha1_expected':blob,'git_blob_sha1_actual':subprocess.check_output(['git','hash-object',str(p)],text=True).strip(),'sha256':hashlib.sha256(b).hexdigest(),'license':lic,'status':'VERIFIED_LOCAL_BYTES'})
+          (root/'ACQUISITION_RESULT.json').write_text(json.dumps({'protocol':'D027_V5','sources':rows},indent=2)+'\n')
+          PY
+          (cd acquisition && zip -r ../D027_V5_ACQUISITION_RESULT.zip .)
+      - name: Upload acquisition result
+        uses: actions/upload-artifact@v4
+        with:
+          name: d027-v5-acquisition-result
+          path: D027_V5_ACQUISITION_RESULT.zip
+          if-no-files-found: error
+          retention-days: 1
