@@ -1,0 +1,6 @@
+body { font-family: Arial, sans-serif; background: #f5f7fb; }
+.container { max-width: 720px; margin: 20px auto; background: white; padding: 20px; border-radius: 8px; }
+.bar { width: 100%; background: #eee; height: 18px; border-radius: 9px; overflow: hidden; }
+#bar-inner { width: 0%; height: 100%; background: #276ef1; transition: width .3s ease; }
+.preview { width: 100%; max-height: 380px; object-fit: contain; border: 1px solid #ddd; }
+.hidden { display: none; }

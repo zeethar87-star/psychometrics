@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Job Progress</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Job __JOB_ID__</h1>
+    <div class="bar"><div id="bar-inner"></div></div>
+    <p>Stage: <strong id="stage">queued</strong></p>
+    <p>Now: <span id="message">waiting</span></p>
+    <p>Last error: <span id="error">none</span></p>
+    <section>
+      <h3>Live preview</h3>
+      <img id="preview" class="preview" />
+    </section>
+    <a id="download" href="#" class="hidden">Download artifact</a>
+  </main>
+<script>
+const jobId = '__JOB_ID__';
+const bar = document.getElementById('bar-inner');
+const stage = document.getElementById('stage');
+const message = document.getElementById('message');
+const error = document.getElementById('error');
+const preview = document.getElementById('preview');
+const dl = document.getElementById('download');
+
+async function refreshFrames() {
+  const res = await fetch(`/api/job/${jobId}/frames`);
+  const data = await res.json();
+  if (data.frames.length) preview.src = data.frames[data.frames.length - 1] + `?t=${Date.now()}`;
+}
+
+const source = new EventSource(`/api/job/${jobId}/events`);
+source.onmessage = async (evt) => {
+  const data = JSON.parse(evt.data);
+  if (data.progress !== undefined) bar.style.width = `${data.progress}%`;
+  if (data.stage) stage.textContent = data.stage;
+  if (data.message) message.textContent = data.message;
+  if (data.last_error_code) error.textContent = data.last_error_code;
+  if (data.type === 'frame') await refreshFrames();
+  if (data.type === 'done' || data.type === 'error') {
+    dl.href = `/api/job/${jobId}/download`;
+    dl.classList.remove('hidden');
+  }
+};
+</script>
+</body>
+</html>
