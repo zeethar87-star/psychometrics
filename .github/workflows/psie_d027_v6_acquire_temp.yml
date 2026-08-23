@@ -1,4 +1,4 @@
-name: PSIE D027 V6 temporary acquisition
+name: PSIE D027 V6 temporary asset bridge
 
 on:
   pull_request:
@@ -9,260 +9,188 @@ permissions:
   contents: read
 
 jobs:
-  acquire-v6:
+  build-v6-assets:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - name: Acquire, verify, convert, and preflight fresh CAD families
+      - name: Acquire exact fresh sources and build source-only asset families
         shell: bash
         run: |
-          set -u
-          mkdir -p out/original out/licenses out/normalized out/preflight out/renders out/logs tool
-          : > out/logs/acquisition.tsv
+          set -euo pipefail
+          mkdir -p work/original work/normalized work/licenses work/tool assets logs
 
-          record() {
-            printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> out/logs/acquisition.tsv
+          fetch_exact() {
+            id="$1"; url="$2"; out="$3"; expected_size="$4"; expected_blob="$5"
+            curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 "$url" -o "$out"
+            actual_size="$(wc -c < "$out" | tr -d ' ')"
+            actual_blob="$(git hash-object "$out")"
+            test "$actual_size" = "$expected_size"
+            test "$actual_blob" = "$expected_blob"
+            if head -c 128 "$out" | grep -Eqi '<html|<!doctype'; then
+              echo "HTML payload rejected for $id" >&2; exit 9
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$id" "$actual_size" "$actual_blob" "$(sha256sum "$out" | awk '{print $1}')" >> logs/exact_sources.tsv
           }
 
-          fetch_git() {
-            id="$1"; url="$2"; outp="$3"; expected_size="$4"; expected_blob="$5"
-            echo "== FETCH $id =="
-            if ! curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 "$url" -o "$outp"; then
-              record "$id" DOWNLOAD_FAIL "$url" curl
-              rm -f "$outp"
-              return 1
-            fi
-            actual_size="$(wc -c < "$outp" | tr -d ' ')"
-            actual_blob="$(git hash-object "$outp")"
-            if [ "$actual_size" != "$expected_size" ]; then
-              record "$id" SIZE_MISMATCH "$actual_size" "$expected_size"
-              rm -f "$outp"
-              return 1
-            fi
-            if [ "$actual_blob" != "$expected_blob" ]; then
-              record "$id" BLOB_MISMATCH "$actual_blob" "$expected_blob"
-              rm -f "$outp"
-              return 1
-            fi
-            if head -c 64 "$outp" | grep -qi '<html\|<!doctype'; then
-              record "$id" HTML_REJECTED "$url" html
-              rm -f "$outp"
-              return 1
-            fi
-            record "$id" VERIFIED_GIT_BYTES "$actual_size" "$actual_blob"
-            return 0
-          }
-
-          fetch_web_dwg() {
-            id="$1"; url="$2"; outp="$3"; referer="$4"
-            echo "== FETCH WEB $id =="
-            ok=0
-            for ua in \
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36' \
-              'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/151 Safari/537.36'; do
-              if curl --fail --location --retry 2 --connect-timeout 20 \
-                -A "$ua" -e "$referer" -H 'Accept: application/octet-stream,*/*;q=0.8' \
-                "$url" -o "$outp"; then ok=1; break; fi
-            done
-            if [ "$ok" != 1 ]; then
-              # second legitimate route: wget with referer/user-agent
-              if wget -O "$outp" --timeout=25 --tries=2 \
-                --referer="$referer" \
-                --user-agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/151 Safari/537.36' \
-                "$url"; then ok=1; fi
-            fi
-            if [ "$ok" != 1 ]; then
-              record "$id" DOWNLOAD_FAIL "$url" curl+wget
-              rm -f "$outp"
-              return 1
-            fi
-            size="$(wc -c < "$outp" | tr -d ' ')"
-            sig="$(head -c 6 "$outp" | tr -d '\000' || true)"
-            if head -c 128 "$outp" | grep -qi '<html\|<!doctype'; then
-              record "$id" HTML_REJECTED "$size" "$sig"
-              rm -f "$outp"
-              return 1
-            fi
-            if [ "$size" -lt 100000 ]; then
-              record "$id" TOO_SMALL "$size" "$sig"
-              rm -f "$outp"
-              return 1
-            fi
-            case "$sig" in AC10*) ;; *) record "$id" DWG_SIGNATURE_REJECTED "$size" "$sig"; rm -f "$outp"; return 1;; esac
-            record "$id" VERIFIED_WEB_DWG "$size" "$sig"
-            return 0
-          }
-
-          # ------------------- exact GitHub fresh families -------------------
-          fetch_git bbl_cafm \
-            'https://raw.githubusercontent.com/bbl-dres/plan-check/main/assets/test-files/CAD.V01-CAFM-Plan-DE.dwg' \
-            out/original/bbl_CAD.V01-CAFM-Plan-DE.dwg 381509 89ce7be18c73424944e85332641e244fda39e9a7 || true
-
-          fetch_git bbl_arch2011 \
+          fetch_exact bbl_arch2011 \
             'https://raw.githubusercontent.com/bbl-dres/plan-check/main/assets/test-files/2011-DM-0-A04-6A1.dwg' \
-            out/original/bbl_2011-DM-0-A04-6A1.dwg 2017491 92cc5f339d494c7a94f25a6746a46b6f182579a8 || true
-
-          fetch_git nayeem_tower \
+            work/original/bbl_2011-DM-0-A04-6A1.dwg 2017491 92cc5f339d494c7a94f25a6746a46b6f182579a8
+          fetch_exact nayeem_tower \
             'https://raw.githubusercontent.com/nayeem-rafi/Advanced-Electrical-and-Civil-Layout-Design-for-a-Modern-High-Rise-Residential-Tower/main/Main%20Drwaing%20DWG%20File/Drawing_file.dwg' \
-            out/original/nayeem_Drawing_file.dwg 893344 b88845abea7a6a55b7fd3c9368fd3233cd7d1193 || true
-
-          # ------------------- official ETSU OER fresh family -------------------
-          ETSU_PAGE='https://dc.etsu.edu/entc-2160-oer/5/'
-          curl --fail --location --retry 2 "$ETSU_PAGE" -o out/licenses/etsu_module03b_rights.html || true
-          fetch_web_dwg etsu_family_home \
-            'https://dc.etsu.edu/cgi/viewcontent.cgi?article=1004&context=entc-2160-oer&filename=16&type=additional' \
-            out/original/etsu_Family_Home_Floorplans.dwg "$ETSU_PAGE" || true
-          fetch_web_dwg etsu_primary_bedroom \
-            'https://dc.etsu.edu/cgi/viewcontent.cgi?article=1004&context=entc-2160-oer&filename=21&type=additional' \
-            out/original/etsu_Primary_Bedroom_Floorplan.dwg "$ETSU_PAGE" || true
-
-          # ------------------- direct-DXF fallbacks / independent buffers -------------------
-          fetch_git qinchuan_sample \
-            'https://raw.githubusercontent.com/qinchuan1122/cad-dwg-reader/main/samples/sample_simple.dxf' \
-            out/original/qinchuan_sample_simple.dxf 63616 e769544f349b5c5551dd17c8eb94365814f0cd09 || true
-
-          fetch_git omar_example \
-            'https://raw.githubusercontent.com/omarmarzouk2018/CAD/main/Python/output/example_drawing.dxf' \
-            out/original/omar_example_drawing.dxf 58941 4a6dae5b68ca9c9c0a1da369109fb3682abb7942 || true
-
-          fetch_git red1oon_floor \
+            work/original/nayeem_Drawing_file.dwg 893344 b88845abea7a6a55b7fd3c9368fd3233cd7d1193
+          fetch_exact red1oon_floor \
             'https://raw.githubusercontent.com/red1oon/BIMCompiler/master/deploy/dev/dxf/DX_FLOOR_GF.dxf' \
-            out/original/red1oon_DX_FLOOR_GF.dxf 0 __DISCOVER__ || true
+            work/original/red1oon_DX_FLOOR_GF.dxf 184047 190b1748ec56549129f7871851c4b7af09012d48
 
-          # Correct red1oon helper: fetch without preknown size/blob, then record local identity.
-          if [ ! -f out/original/red1oon_DX_FLOOR_GF.dxf ]; then
-            if curl --fail --location --retry 3 \
-              'https://raw.githubusercontent.com/red1oon/BIMCompiler/master/deploy/dev/dxf/DX_FLOOR_GF.dxf' \
-              -o out/original/red1oon_DX_FLOOR_GF.dxf; then
-              sz="$(wc -c < out/original/red1oon_DX_FLOOR_GF.dxf | tr -d ' ')"
-              bl="$(git hash-object out/original/red1oon_DX_FLOOR_GF.dxf)"
-              record red1oon_floor VERIFIED_GIT_BYTES_DISCOVERED "$sz" "$bl"
-            fi
-          fi
-
-          # ------------------- rights evidence -------------------
-          curl --fail --location 'https://raw.githubusercontent.com/bbl-dres/plan-check/main/LICENSE' -o out/licenses/bbl_LICENSE.txt || true
-          curl --fail --location 'https://raw.githubusercontent.com/nayeem-rafi/Advanced-Electrical-and-Civil-Layout-Design-for-a-Modern-High-Rise-Residential-Tower/main/LICENSE' -o out/licenses/nayeem_LICENSE.txt || true
-          curl --fail --location 'https://raw.githubusercontent.com/qinchuan1122/cad-dwg-reader/main/LICENSE' -o out/licenses/qinchuan_LICENSE.txt || true
-          curl --fail --location 'https://raw.githubusercontent.com/omarmarzouk2018/CAD/main/Python/setup.py' -o out/licenses/omar_setup_license_evidence.py || true
-          curl --fail --location 'https://raw.githubusercontent.com/red1oon/BIMCompiler/master/README.md' -o out/licenses/red1oon_README_license_evidence.md || true
-
-          # ------------------- pinned LibreDWG binary bridge -------------------
-          fetch_git libredwg_bundle \
+          fetch_exact libredwg_bundle \
             'https://raw.githubusercontent.com/Long68-code/claude-dwg-assets/main/libredwg_ubuntu24.tar.gz' \
-            tool/libredwg_ubuntu24.tar.gz 6386831 f30d50ed8e86094a43ca88a90c5f5cdf9d6ef048 || true
-          if [ -f tool/libredwg_ubuntu24.tar.gz ]; then
-            mkdir -p tool/libredwg
-            tar xzf tool/libredwg_ubuntu24.tar.gz -C tool/libredwg
-            find tool/libredwg -maxdepth 3 -type f -printf '%p\n' > out/logs/libredwg_files.txt
-            DWG2DXF="$(find tool/libredwg -type f -name dwg2dxf | head -1)"
-            if [ -n "$DWG2DXF" ]; then chmod +x "$DWG2DXF"; fi
-            LIBDIR="$(dirname "$(find tool/libredwg -type f -name 'libredwg.so*' | head -1)")"
-            if [ -n "${DWG2DXF:-}" ] && [ -x "$DWG2DXF" ]; then
-              LD_LIBRARY_PATH="$LIBDIR" "$DWG2DXF" --version > out/logs/libredwg_version.txt 2>&1 || true
-              for f in out/original/*.dwg; do
-                [ -e "$f" ] || continue
-                base="$(basename "$f" .dwg)"
-                echo "== CONVERT $base =="
-                if LD_LIBRARY_PATH="$LIBDIR" "$DWG2DXF" -y -o "out/normalized/${base}.dxf" "$f" >"out/logs/${base}_dwg2dxf.log" 2>&1; then
-                  record "$base" DWG2DXF_OK "$(wc -c < "out/normalized/${base}.dxf" | tr -d ' ')" "$DWG2DXF"
-                else
-                  record "$base" DWG2DXF_FAIL "$f" "$DWG2DXF"
-                  rm -f "out/normalized/${base}.dxf"
-                fi
-              done
-            else
-              record libredwg_tool TOOL_NOT_FOUND tar_extracted no_dwg2dxf
-            fi
-          fi
+            work/tool/libredwg_ubuntu24.tar.gz 6386831 f30d50ed8e86094a43ca88a90c5f5cdf9d6ef048
 
-          # copy checked-in DXF originals to normalized unchanged for inspection only
-          for f in out/original/*.dxf; do
-            [ -e "$f" ] || continue
-            cp "$f" "out/normalized/$(basename "$f")"
-          done
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/bbl-dres/plan-check/main/LICENSE' -o work/licenses/bbl_LICENSE.txt
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/nayeem-rafi/Advanced-Electrical-and-Civil-Layout-Design-for-a-Modern-High-Rise-Residential-Tower/main/LICENSE' -o work/licenses/nayeem_LICENSE.txt
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/red1oon/BIMCompiler/master/LICENSE' -o work/licenses/red1oon_LICENSE.txt
 
-          # ------------------- parse + text/layers + controlled render -------------------
-          python3 -m pip install --quiet 'ezdxf>=1.3' matplotlib pillow
-          python3 - <<'PY'
-          import json, math, os, pathlib, hashlib, traceback
-          import ezdxf
-          from ezdxf import bbox
-          from ezdxf.addons.drawing import Frontend, RenderContext
-          from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+          mkdir -p work/tool/libredwg
+          tar xzf work/tool/libredwg_ubuntu24.tar.gz -C work/tool/libredwg
+          DWG2DXF="$(find work/tool/libredwg -type f -name dwg2dxf | head -1)"
+          LIBDIR="$(dirname "$(find work/tool/libredwg -type f -name 'libredwg.so*' | head -1)")"
+          test -x "$DWG2DXF"
+          LD_LIBRARY_PATH="$LIBDIR" "$DWG2DXF" --version > logs/libredwg_version.txt 2>&1 || true
+          LD_LIBRARY_PATH="$LIBDIR" "$DWG2DXF" -y -o work/normalized/bbl_2011-DM-0-A04-6A1.dxf work/original/bbl_2011-DM-0-A04-6A1.dwg > logs/bbl_dwg2dxf.log 2>&1
+          LD_LIBRARY_PATH="$LIBDIR" "$DWG2DXF" -y -o work/normalized/nayeem_Drawing_file.dxf work/original/nayeem_Drawing_file.dwg > logs/nayeem_dwg2dxf.log 2>&1
+          cp work/original/red1oon_DX_FLOOR_GF.dxf work/normalized/red1oon_DX_FLOOR_GF.dxf
+
+          python3 -m pip install --quiet 'ezdxf>=1.3' matplotlib pillow pymupdf numpy shapely
+
+          cat > work/build_assets.py <<'PY'
+          import collections, csv, hashlib, json, pathlib, shutil, tempfile
+          import numpy as np
+          import ezdxf, fitz
+          from PIL import Image, ImageOps, ImageDraw
           import matplotlib
           matplotlib.use('Agg')
           import matplotlib.pyplot as plt
+          from ezdxf import bbox as ezbbox
+          from ezdxf.addons.drawing import Frontend, RenderContext
+          from ezdxf.addons.drawing.config import Configuration, ColorPolicy, BackgroundPolicy
+          from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 
-          root=pathlib.Path('out')
-          rows=[]
-          for p in sorted((root/'normalized').glob('*.dxf')):
-              rec={'file':p.name,'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size}
+          ROOT=pathlib.Path('.')
+          def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+          def dump(p,obj):
+              p=pathlib.Path(p); p.parent.mkdir(parents=True,exist_ok=True)
+              p.write_text(json.dumps(obj,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          def safe(v):
               try:
-                  doc=ezdxf.readfile(p)
-                  msp=doc.modelspace()
-                  ents=list(msp)
-                  rec['parse']='PASS'
-                  rec['entities']=len(ents)
-                  counts={}
-                  for e in ents: counts[e.dxftype()]=counts.get(e.dxftype(),0)+1
-                  rec['entity_types']=counts
-                  rec['layers']=[x.dxf.name for x in doc.layers]
-                  texts=[]
+                  if hasattr(v,'x'): return [float(v.x),float(v.y),float(getattr(v,'z',0.0))]
+                  if isinstance(v,(list,tuple)): return [safe(x) for x in v]
+                  if isinstance(v,(str,int,float,bool)) or v is None: return v
+                  return str(v)
+              except Exception: return str(v)
+          def entity_record(e):
+              r={'type':e.dxftype(),'handle':getattr(e.dxf,'handle',None),'layer':getattr(e.dxf,'layer',None)}
+              for k in ('insert','text','height','rotation','start','end','center','radius'):
+                  try:
+                      if e.dxf.hasattr(k): r[k]=safe(getattr(e.dxf,k))
+                  except Exception: pass
+              if e.dxftype()=='MTEXT':
+                  try:r['plain_text']=e.plain_text()
+                  except Exception:pass
+              if e.dxftype()=='INSERT':
+                  r['block_name']=getattr(e.dxf,'name','')
+                  r['attribs']=[{'tag':a.dxf.tag,'text':a.dxf.text,'insert':safe(a.dxf.insert)} for a in e.attribs]
+              return r
+          def render(doc,outdir):
+              fig=plt.figure(figsize=(11.69,8.27),dpi=100,facecolor='white')
+              ax=fig.add_axes([0.02,0.02,0.96,0.96]); ax.set_axis_off(); ax.set_aspect('equal',adjustable='box')
+              ext=ezbbox.extents(doc.modelspace(),fast=True)
+              if not ext.has_data: raise RuntimeError('EMPTY_GEOMETRY_BBOX')
+              xmin,ymin=float(ext.extmin.x),float(ext.extmin.y); xmax,ymax=float(ext.extmax.x),float(ext.extmax.y)
+              dx=max(xmax-xmin,1e-9);dy=max(ymax-ymin,1e-9);mx=max(dx*.05,1e-6);my=max(dy*.05,1e-6)
+              ax.set_xlim(xmin-mx,xmax+mx);ax.set_ylim(ymin-my,ymax+my)
+              cfg=Configuration(color_policy=ColorPolicy.BLACK,background_policy=BackgroundPolicy.WHITE)
+              Frontend(RenderContext(doc),MatplotlibBackend(ax),config=cfg).draw_layout(doc.modelspace(),finalize=False)
+              ax.set_xlim(xmin-mx,xmax+mx);ax.set_ylim(ymin-my,ymax+my);fig.canvas.draw()
+              basis=np.asarray([[0.,0.,1.],[1.,0.,1.],[0.,1.,1.]])
+              disp=np.asarray([ax.transData.transform((0.,0.)),ax.transData.transform((1.,0.)),ax.transData.transform((0.,1.))])
+              coeff=np.linalg.solve(basis,disp)
+              transform={
+                'source_to_pdf_points_matrix_rows':(coeff*(72./fig.dpi)).tolist(),
+                'source_to_png600_bottomleft_matrix_rows':(coeff*(600./fig.dpi)).tolist(),
+                'pdf_page_points':[fig.get_figwidth()*72.,fig.get_figheight()*72.],
+                'png600_size':[int(round(fig.get_figwidth()*600)),int(round(fig.get_figheight()*600))],
+                'source_bbox':[xmin,ymin,xmax,ymax],'margin_fraction':0.05,'color_policy':'BLACK_ON_WHITE'}
+              vector=outdir/'02_VECTOR_RENDER'/'canonical_vector.pdf';svg=outdir/'02_VECTOR_RENDER'/'preview.svg'
+              fig.savefig(vector,format='pdf',facecolor='white');fig.savefig(svg,format='svg',facecolor='white');plt.close(fig)
+              vdoc=fitz.open(vector)
+              for dpi in (600,300,150):
+                  pix=vdoc[0].get_pixmap(matrix=fitz.Matrix(dpi/72,dpi/72),alpha=False)
+                  pix.save(outdir/'03_RASTER_RENDER'/f'canonical_{dpi}dpi.png')
+              img300=Image.open(outdir/'03_RASTER_RENDER'/'canonical_300dpi.png').convert('RGB')
+              img300.save(outdir/'03_RASTER_RENDER'/'canonical_300dpi.tif',compression='tiff_deflate')
+              img300.save(outdir/'04_RASTER_PDF'/'canonical_raster_only.pdf','PDF',resolution=300)
+              return transform
+          def verify_pdf(p):
+              d=fitz.open(p);rows=[];ok=True
+              for i,page in enumerate(d):
+                  r={'page':i,'vector_drawings':len(page.get_drawings()),'recoverable_text_words':len(page.get_text('words')),'image_objects':len(page.get_images(full=True))}
+                  r['raster_only']=r['vector_drawings']==0 and r['recoverable_text_words']==0 and r['image_objects']>=1;ok &= r['raster_only'];rows.append(r)
+              return {'raster_only':bool(ok and rows),'pages':rows}
+          def contact(img,out,source_id):
+              base=Image.new('RGB',(1800,1400),'white');dr=ImageDraw.Draw(base);dr.text((40,25),f'PSIE V6 source audit: {source_id} — no production prediction',fill='black')
+              full=img.copy();full.thumbnail((1100,900));base.paste(full,(40,90));w,h=img.size;y=90
+              for b in [(0,0,w//2,h//2),(w//2,0,w,h//2),(0,h//2,w//2,h),(w//2,h//2,w,h)]:
+                  q=img.crop(b);q.thumbnail((550,280));base.paste(q,(1200,y));y+=310
+              base.save(out)
+          def build(source_id,source_family,orig,norm,license_path):
+              out=pathlib.Path('assets')/source_id
+              for d in ['00_SOURCE','01_NORMALIZED','02_VECTOR_RENDER','03_RASTER_RENDER','04_RASTER_PDF','05_PREVIEWS','06_FORENSICS','07_TRUTH']:(out/d).mkdir(parents=True,exist_ok=True)
+              orig=pathlib.Path(orig);norm=pathlib.Path(norm);lic=pathlib.Path(license_path)
+              shutil.copy2(orig,out/'00_SOURCE'/('original'+orig.suffix.lower()));shutil.copy2(lic,out/'00_SOURCE'/'LICENSE_EVIDENCE.txt');shutil.copy2(norm,out/'01_NORMALIZED'/'normalized.dxf')
+              doc=ezdxf.readfile(norm);ents=list(doc.modelspace());repairs=[]
+              for e in ents:
+                  if e.dxftype()=='TEXT':
+                      try:
+                          if (int(getattr(e.dxf,'halign',0) or 0)!=0 or int(getattr(e.dxf,'valign',0) or 0)!=0) and getattr(e.dxf,'align_point',None) is None:
+                              e.dxf.align_point=e.dxf.insert;repairs.append({'handle':getattr(e.dxf,'handle',None),'repair':'TEXT_MISSING_ALIGN_POINT_SET_TO_INSERT'})
+                      except Exception:pass
+              records=[entity_record(e) for e in ents];dump(out/'01_NORMALIZED'/'entity_dump.json',records);dump(out/'01_NORMALIZED'/'normalization_repairs.json',{'repairs':repairs,'semantic_intent':'renderability-only; immutable source retained'})
+              counts=collections.Counter((e.dxftype(),getattr(e.dxf,'layer','')) for e in ents)
+              with (out/'01_NORMALIZED'/'layer_inventory.csv').open('w',newline='',encoding='utf-8') as f:
+                  w=csv.writer(f);w.writerow(['layer','entity_type','count']);[w.writerow([layer,typ,n]) for (typ,layer),n in sorted(counts.items(),key=lambda x:(x[0][1],x[0][0]))]
+              with (out/'01_NORMALIZED'/'text_inventory.csv').open('w',newline='',encoding='utf-8') as f:
+                  w=csv.writer(f);w.writerow(['kind','handle','layer','tag_or_type','text','x','y'])
                   for e in ents:
-                      if e.dxftype()=='TEXT':
-                          texts.append({'type':'TEXT','text':e.dxf.text,'insert':[float(e.dxf.insert.x),float(e.dxf.insert.y)]})
-                      elif e.dxftype()=='MTEXT':
-                          texts.append({'type':'MTEXT','text':e.plain_text(),'insert':[float(e.dxf.insert.x),float(e.dxf.insert.y)]})
-                  rec['texts']=texts[:500]
-                  rec['text_count']=len(texts)
-                  try:
-                      ext=bbox.extents(ents, fast=True)
-                      if ext.has_data:
-                          rec['bbox']={'min':[float(ext.extmin.x),float(ext.extmin.y)],'max':[float(ext.extmax.x),float(ext.extmax.y)]}
-                  except Exception as ex:
-                      rec['bbox_error']=repr(ex)
-                  try:
-                      fig=plt.figure(figsize=(14,10),dpi=100)
-                      ax=fig.add_axes([0.01,0.01,0.98,0.98])
-                      ctx=RenderContext(doc)
-                      out=MatplotlibBackend(ax)
-                      Frontend(ctx,out).draw_layout(msp, finalize=True)
-                      ax.set_aspect('equal', adjustable='datalim')
-                      ax.axis('off')
-                      fig.savefig(root/'renders'/f'{p.stem}.png',dpi=180,bbox_inches='tight',pad_inches=0.02)
-                      plt.close(fig)
-                      rec['render']='PASS'
-                  except Exception as ex:
-                      plt.close('all')
-                      rec['render']='FAIL'
-                      rec['render_error']=repr(ex)
-              except Exception as ex:
-                  rec['parse']='FAIL'
-                  rec['error']=repr(ex)
-                  rec['traceback']=traceback.format_exc()
-              rows.append(rec)
-              (root/'preflight'/f'{p.stem}.json').write_text(json.dumps(rec,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          (root/'preflight'/'ALL_PREFLIGHT.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                      if e.dxftype()=='TEXT': p=e.dxf.insert;w.writerow(['ENTITY',e.dxf.handle,e.dxf.layer,'TEXT',e.dxf.text,p.x,p.y])
+                      elif e.dxftype()=='MTEXT': p=e.dxf.insert;w.writerow(['ENTITY',e.dxf.handle,e.dxf.layer,'MTEXT',e.plain_text(),p.x,p.y])
+                      elif e.dxftype()=='INSERT':
+                          for a in e.attribs:
+                              p=a.dxf.insert;w.writerow(['ATTRIB',e.dxf.handle,e.dxf.layer,a.dxf.tag,a.dxf.text,p.x,p.y])
+              dump(out/'00_SOURCE'/'SOURCE.json',{'protocol':'D027_V6','source_id':source_id,'source_family':source_family,'original_filename':orig.name,'source_sha256':sha(orig),'normalized_dxf_sha256':sha(norm),'license_evidence_sha256':sha(lic),'prediction_inspected':False})
+              transform=render(doc,out);dump(out/'06_FORENSICS'/'source_to_render_transform.json',transform)
+              rp=out/'04_RASTER_PDF'/'canonical_raster_only.pdf';ver=verify_pdf(rp);ver.update({'pdf_sha256':sha(rp),'source_sha256':sha(orig)});dump(out/'04_RASTER_PDF'/'raster_only_verification.json',ver)
+              img=Image.open(out/'03_RASTER_RENDER'/'canonical_300dpi.png').convert('RGB');prev=img.copy();prev.thumbnail((1800,1200));prev.save(out/'05_PREVIEWS'/'full_preview.jpg',quality=90);prev.save(out/'05_PREVIEWS'/'full_preview.webp',quality=88);th=prev.copy();th.thumbnail((500,500));th.save(out/'05_PREVIEWS'/'thumbnail.png');contact(prev,out/'05_PREVIEWS'/'contact_sheet.png',source_id)
+              ext=ezbbox.extents(doc.modelspace(),fast=True);dump(out/'06_FORENSICS'/'geometry_bbox.json',{'min':[float(ext.extmin.x),float(ext.extmin.y)],'max':[float(ext.extmax.x),float(ext.extmax.y)]} if ext.has_data else None)
+              dump(out/'06_FORENSICS'/'entity_statistics.json',{'total_entities':len(ents),'by_type':dict(collections.Counter(e.dxftype() for e in ents))})
+              dump(out/'02_VECTOR_RENDER'/'renderer_manifest.json',{'renderer':'ezdxf.addons.drawing + matplotlib; MuPDF rasterization','vector_pdf_sha256':sha(out/'02_VECTOR_RENDER'/'canonical_vector.pdf'),'svg_sha256':sha(out/'02_VECTOR_RENDER'/'preview.svg')})
+              dump(out/'03_RASTER_RENDER'/'raster_manifest.json',{'master_dpi':600,'derivatives':[300,150],'master_sha256':sha(out/'03_RASTER_RENDER'/'canonical_600dpi.png')})
+              return {'source_id':source_id,'source_family':source_family,'source_sha256':sha(orig),'normalized_sha256':sha(norm),'raster_pdf_sha256':sha(rp),'raster_only':ver['raster_only'],'entity_count':len(ents)}
+          rows=[]
+          rows.append(build('bbl_arch_2011','bbl_dres_plan_check','work/original/bbl_2011-DM-0-A04-6A1.dwg','work/normalized/bbl_2011-DM-0-A04-6A1.dxf','work/licenses/bbl_LICENSE.txt'))
+          rows.append(build('nayeem_tower','nayeem_rafi_tower','work/original/nayeem_Drawing_file.dwg','work/normalized/nayeem_Drawing_file.dxf','work/licenses/nayeem_LICENSE.txt'))
+          rows.append(build('red1oon_floor_gf','red1oon_bimcompiler','work/original/red1oon_DX_FLOOR_GF.dxf','work/normalized/red1oon_DX_FLOOR_GF.dxf','work/licenses/red1oon_LICENSE.txt'))
+          dump('V6_ASSET_FACTORY_RESULT.json',{'protocol':'D027_V6','status':'SOURCE_ONLY_ASSETS_BUILT','prediction_inspected':False,'rows':rows})
           PY
 
-          # immutable-byte manifest
-          (cd out && find original licenses normalized preflight renders logs -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
-          python3 - <<'PY'
-          import pathlib, hashlib, json
-          root=pathlib.Path('out')
-          src=[]
-          for p in sorted((root/'original').glob('*')):
-              if p.is_file():
-                  b=p.read_bytes()
-                  src.append({'filename':p.name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'signature_hex':b[:16].hex()})
-          (root/'V6_ACQUISITION_RESULT.json').write_text(json.dumps({'protocol':'D027_V6','status':'CI_MATERIALIZED','originals':src},indent=2)+'\n')
-          PY
-          (cd out && zip -qr ../D027_V6_CI_ACQUISITION_RESULT.zip .)
+          python3 work/build_assets.py
+          find assets -path '*/07_TRUTH/*' -type f -delete
+          find assets -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          zip -qr D027_V6_SOURCE_ASSET_FACTORY_RESULT.zip assets V6_ASSET_FACTORY_RESULT.json SHA256SUMS.txt logs
 
-      - name: Upload V6 acquisition/preflight artifact
+      - name: Upload V6 source asset factory artifact
         uses: actions/upload-artifact@v4
         with:
-          name: d027-v6-acquisition-preflight
-          path: D027_V6_CI_ACQUISITION_RESULT.zip
+          name: d027-v6-source-assets
+          path: D027_V6_SOURCE_ASSET_FACTORY_RESULT.zip
           if-no-files-found: error
           retention-days: 1
