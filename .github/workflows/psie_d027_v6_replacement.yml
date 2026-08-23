@@ -1,0 +1,58 @@
+name: PSIE D027 V6 replacement acquisition
+
+on:
+  push:
+    branches:
+      - psie-d027-v6-replacement-20260824
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Materialize fresh architectural replacement candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p acquisition/sources acquisition/licenses
+          url='https://raw.githubusercontent.com/jscad/sample-files/master/dxf/dxf-parser/floorplan.dxf'
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 "$url" -o acquisition/sources/jscad_floorplan.dxf
+          test "$(wc -c < acquisition/sources/jscad_floorplan.dxf | tr -d ' ')" = "1117143"
+          test "$(git hash-object acquisition/sources/jscad_floorplan.dxf)" = "1c9fc5a4951f24b77b3414ef960d64886a050d86"
+          curl --fail --location --retry 3 --retry-all-errors 'https://raw.githubusercontent.com/jscad/sample-files/master/dxf/dxf-parser/README.md' -o acquisition/licenses/jscad_dxf_samples_README.md
+          test "$(wc -c < acquisition/licenses/jscad_dxf_samples_README.md | tr -d ' ')" = "120"
+          test "$(git hash-object acquisition/licenses/jscad_dxf_samples_README.md)" = "85fcdac08e80b28f412fb293649bfc8d917b6150"
+          (cd acquisition && sha256sum sources/* licenses/* > SHA256SUMS.txt)
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess
+          root=pathlib.Path('acquisition')
+          p=root/'sources/jscad_floorplan.dxf'
+          data=p.read_bytes()
+          result={
+            'protocol':'D027_V6_REPLACEMENT_SOURCE_ONLY',
+            'prediction_inspected':False,
+            'sources':[{
+              'source_id':'jscad_floorplan',
+              'source_family':'bjnortier_dxf_samples',
+              'repository':'jscad/sample-files',
+              'path':'dxf/dxf-parser/floorplan.dxf',
+              'local_bytes':len(data),
+              'git_blob_sha1_expected':'1c9fc5a4951f24b77b3414ef960d64886a050d86',
+              'git_blob_sha1_actual':subprocess.check_output(['git','hash-object',str(p)],text=True).strip(),
+              'sha256':hashlib.sha256(data).hexdigest(),
+              'license_evidence':'dxf/dxf-parser/README.md states samples imported from bjnortier/dxf under MIT License',
+              'status':'VERIFIED_LOCAL_BYTES'
+            }]
+          }
+          (root/'ACQUISITION_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+          (cd acquisition && zip -r ../D027_V6_REPLACEMENT_ACQUISITION.zip .)
+      - name: Upload acquisition result
+        uses: actions/upload-artifact@v4
+        with:
+          name: d027-v6-replacement-acquisition
+          path: D027_V6_REPLACEMENT_ACQUISITION.zip
+          if-no-files-found: error
+          retention-days: 1
